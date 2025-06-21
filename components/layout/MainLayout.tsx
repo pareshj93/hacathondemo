@@ -8,7 +8,7 @@ import { User, AuthChangeEvent, Session } from '@supabase/supabase-js';
 import LeftSidebar from './LeftSidebar';
 import CenterFeed from './CenterFeed';
 import RightSidebar from './RightSidebar';
-import { AuthModal } from '@/components/auth/AuthModal'; // Corrected to named import
+import { AuthModal } from '@/components/auth/AuthModal';
 import ProfilePage from '@/components/pages/ProfilePage';
 import PrivacyPage from '@/components/pages/PrivacyPage';
 import VerificationPage from '@/components/pages/VerificationPage';
@@ -32,72 +32,95 @@ export default function MainLayout() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const currentPage = searchParams.get('page') || 'feed';
-  const isVerified = searchParams.get('verified') === 'true';
 
-  const loadProfile = useCallback(async (userId: string, retryCount = 0) => {
+  const onVerificationUpdate = useCallback(async (userId: string) => {
     try {
       const profileData = await getUserProfile(userId);
       if (profileData) {
         setProfile(profileData);
-        setError(null);
-      } else if (retryCount < 3) {
-        setTimeout(() => loadProfile(userId, retryCount + 1), 1000);
-      } else {
-        setProfile(null);
-        setError("Could not load user profile. Please try again later.");
       }
-    } catch (error: any) {
-       if (retryCount < 2) {
-        setTimeout(() => loadProfile(userId, retryCount + 1), 1000);
-      } else {
-        setProfile(null);
-        setError("Could not load user profile. Please try again later.");
-      }
+    } catch (e) {
+      console.error("Error reloading profile", e);
     }
   }, []);
 
+
+  // This effect handles the initial session check and subscribes to auth changes.
   useEffect(() => {
+    // Show hackathon popup on first visit
     if (currentPage === 'feed' && !sessionStorage.getItem('hackathonPopupShown')) {
-      setTimeout(() => {
-        setShowHackathonPopup(true);
-        sessionStorage.setItem('hackathonPopupShown', 'true');
-      }, 1500);
-    }
-    
-    if (isVerified) {
-      toast.success("Email Verified! Welcome to Edubridgepeople.");
-      router.replace('/?page=feed');
-    }
-    
-    if (!isSupabaseConnected) {
-      setLoading(false);
-      return;
+        setTimeout(() => {
+            setShowHackathonPopup(true);
+            sessionStorage.setItem('hackathonPopupShown', 'true');
+        }, 1500);
     }
 
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event: AuthChangeEvent, session: Session | null) => {
-        setLoading(true);
+    if (!isSupabaseConnected) {
+        setLoading(false);
+        return;
+    }
+
+    setLoading(true);
+
+    const checkSessionAndLoadProfile = async (session: Session | null) => {
         const currentUser = session?.user ?? null;
         setUser(currentUser);
 
         if (currentUser) {
-            if (currentUser.email_confirmed_at) {
-                await loadProfile(currentUser.id);
+            // Retry logic for fetching profile
+            let profileData = null;
+            for (let i = 0; i < 3; i++) {
+                profileData = await getUserProfile(currentUser.id);
+                if (profileData) break;
+                await new Promise(res => setTimeout(res, 1000)); // wait 1s before retrying
+            }
+            
+            if (profileData) {
+                setProfile(profileData);
+                setError(null);
             } else {
                 setProfile(null);
+                setError("Could not load user profile. Please try refreshing the page.");
             }
         } else {
             setProfile(null);
         }
         setLoading(false);
+    };
+
+    // Check initial session
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
+        checkSessionAndLoadProfile(data.session);
     });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(
+      (event: AuthChangeEvent, session: Session | null) => {
+        // Only re-check session on sign-in or sign-out to avoid loops
+        if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+           checkSessionAndLoadProfile(session);
+        }
+      }
+    );
 
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, [isVerified, router, currentPage, loadProfile]);
+  }, [currentPage]); // Re-run only if the page fundamentally changes
+
+  // This separate effect handles the one-time "verified" toast.
+  useEffect(() => {
+    const isVerified = searchParams.get('verified') === 'true';
+    if (isVerified) {
+        toast.success("Email Verified! Welcome to Edubridgepeople.");
+        // Clean the URL
+        router.replace('/?page=feed');
+    }
+  }, [searchParams, router]);
+
 
   const handleAuthSuccess = () => {
     setShowAuthModal(false);
+    // The onAuthStateChange listener will handle the profile reload.
   };
 
   const openAuthModal = (mode: 'signup' | 'signin') => {
@@ -107,20 +130,40 @@ export default function MainLayout() {
   
   const renderPage = () => {
     if (!isSupabaseConnected) {
-      return <div className="p-4 text-center">Please connect to Supabase to use the application.</div>;
+      return (
+        <Card className="max-w-md mx-auto mt-10">
+            <CardContent className="p-8 text-center">
+                 <Database className="w-12 h-12 text-red-500 mx-auto mb-4" />
+                <h2 className="text-xl font-semibold mb-2">Database Not Connected</h2>
+                <p className="text-gray-600">
+                  Application features are disabled. Please ensure Supabase credentials are set correctly in your environment.
+                </p>
+            </CardContent>
+        </Card>
+      );
     }
     
     if (user && !user.email_confirmed_at) {
-      return <div className="p-4 text-center">Please check your email to verify your account.</div>;
+       return (
+        <Card className="max-w-md mx-auto mt-10">
+            <CardContent className="p-8 text-center">
+                <Mail className="w-12 h-12 text-blue-500 mx-auto mb-4" />
+                <h2 className="text-xl font-semibold mb-2">Please Verify Your Email</h2>
+                <p className="text-gray-600">
+                  A verification link has been sent to your email address. Please click it to continue.
+                </p>
+            </CardContent>
+        </Card>
+      );
     }
 
     switch (currentPage) {
       case 'profile':
-        return <ProfilePage user={user} profile={profile} onVerificationUpdate={loadProfile} />;
+        return <ProfilePage user={user} profile={profile} onVerificationUpdate={onVerificationUpdate} />;
       case 'privacy':
         return <PrivacyPage />;
       case 'verification':
-        return <VerificationPage user={user} profile={profile} onVerificationUpdate={loadProfile} />;
+        return <VerificationPage user={user} profile={profile} onVerificationUpdate={onVerificationUpdate} />;
       case 'terms':
         return <TermsAndConditionsPage />;
       default:

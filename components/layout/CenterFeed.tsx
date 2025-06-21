@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { User, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { Profile, Post, supabase, isSupabaseConnected, Like, Comment } from '@/lib/supabase';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -12,12 +12,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { toast } from 'sonner';
+import { Heart, MessageCircle, Share2, CheckCircle, BookOpen, Gift, Lock, ImagePlus, User as UserIcon, Link2, MoreHorizontal, Edit, Trash2 } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@/components/ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,16 +30,16 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+} from "@/components/ui/alert-dialog";
 
-import { toast } from 'sonner';
-import { Heart, MessageCircle, Share2, CheckCircle, BookOpen, Gift, Lock, ImagePlus, MoreHorizontal, Edit, Trash2, User as UserIcon } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
 
 interface CenterFeedProps {
   user: User | null;
   profile: Profile | null;
 }
+
+// Simple URL regex to find the first link in a body of text
+const URL_REGEX = /https?:\/\/[^\s/$.?#].[^\s]*/i;
 
 export default function CenterFeed({ user, profile }: CenterFeedProps) {
   const [posts, setPosts] = useState<Post[]>([]);
@@ -54,12 +57,67 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   // Interaction states
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [newComments, setNewComments] = useState<Record<string, string>>({});
-
-  // Edit/Delete states
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [editingPost, setEditingPost] = useState<Post | null>(null);
+  const [editedContent, setEditedContent] = useState('');
   const [postToDelete, setPostToDelete] = useState<Post | null>(null);
 
-  const fetchPosts = useCallback(async () => {
+
+  useEffect(() => {
+    if (!isSupabaseConnected) {
+      setLoading(false);
+      return;
+    }
+
+    fetchPosts();
+
+    const handleIncomingPost = async (postPayload: Post) => {
+        // When a new post comes in from the subscription, it won't have the author's profile.
+        // We need to fetch it to ensure the UI can render it correctly.
+        const { data: profileData, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', postPayload.user_id)
+            .single();
+
+        if (profileData && !error) {
+            const newPost: Post = {
+                ...postPayload,
+                profiles: profileData,
+                likes: [], // New posts have no likes
+                comments: [], // New posts have no comments
+            };
+            // Prepend the new, complete post to the feed
+            setPosts(prev => [newPost, ...prev]);
+        }
+    };
+    
+    // Listen for any changes in the database and refetch posts
+    const subscription = supabase
+      .channel('public-feed')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload: RealtimePostgresChangesPayload<Post>) => {
+          const newPost = payload.new as Post;
+          // Type guard to ensure we have a valid post object
+          if (newPost && newPost.id) {
+            handleIncomingPost(newPost);
+          }
+       })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'posts' }, (payload: RealtimePostgresChangesPayload<Post>) => {
+        const updatedPost = payload.new as Post;
+        // Type guard to ensure we have a valid post object with an ID
+        if (updatedPost && updatedPost.id) {
+          // Update a post in place, preserving existing relations
+          setPosts(prevPosts => prevPosts.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
+  }, []);
+
+  const fetchPosts = async () => {
+    setLoading(true);
     try {
       const { data, error } = await supabase
         .from('posts')
@@ -72,40 +130,24 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         .order('created_at', { ascending: false });
 
       if (error) throw error;
+      
       setPosts(data || []);
     } catch (error) {
       console.error('Error fetching posts:', error);
-      toast.error("Could not fetch posts.");
+      toast.error("Could not fetch posts from the database.");
     } finally {
-        // This check ensures we only set loading to false once after the initial fetch
-        if (loading) {
-            setLoading(false);
-        }
+      setLoading(false);
     }
-  }, [loading]); // The `loading` dependency is intentional to allow the initial load state to be managed correctly.
-
-  useEffect(() => {
-    // Fetch posts immediately on component mount, visible to all users.
-    fetchPosts();
-    
-    // Set up a single real-time subscription to listen for changes.
-    const channel = supabase
-      .channel('public-posts-feed')
-      .on('postgres_changes', { event: '*', schema: 'public' }, () => {
-          fetchPosts(); // Refetch data when any change occurs
-       })
-      .subscribe();
-
-    // Cleanup subscription on component unmount
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [fetchPosts]);
+  };
 
   const handlePostSubmit = async () => {
     if (!user || !profile) return;
     setSubmitting(true);
     let imageUrl: string | undefined = undefined;
+
+    // Detect the first link in the post content
+    const foundUrl = content.match(URL_REGEX);
+    const linkUrl = foundUrl ? foundUrl[0] : undefined;
     
     try {
         if (postImageFile) {
@@ -116,18 +158,27 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             imageUrl = publicUrl;
         }
 
-        const postData = {
-            user_id: user.id, post_type: composerType,
-            content: composerType === 'wisdom' ? content.trim() : null,
-            resource_title: composerType === 'donation' ? resourceTitle.trim() : null,
-            resource_category: composerType === 'donation' ? resourceCategory : null,
-            resource_contact: composerType === 'donation' ? resourceContact.trim() : null,
+        const postData: Partial<Post> = {
+            user_id: user.id, 
+            post_type: composerType,
+            content: composerType === 'wisdom' ? content.trim() : undefined,
+            resource_title: composerType === 'donation' ? resourceTitle.trim() : undefined,
+            resource_category: composerType === 'donation' ? resourceCategory : undefined,
+            resource_contact: composerType === 'donation' ? resourceContact.trim() : undefined,
             image_url: imageUrl,
+            link_url: linkUrl, // Save the detected link to the database
         };
-      
-        const { error } = await supabase.from('posts').insert(postData);
+        
+        // This insert will be caught by the realtime subscription, which will then add it to the UI.
+        const { error } = await supabase.from('posts').insert([postData]).select().single();
         if (error) throw error;
-        setContent(''); setResourceTitle(''); setResourceCategory(''); setResourceContact(''); setPostImageFile(null);
+
+        // Reset composer fields
+        setContent(''); 
+        setResourceTitle(''); 
+        setResourceCategory(''); 
+        setResourceContact(''); 
+        setPostImageFile(null);
         toast.success('Post created successfully!');
     } catch (error: any) {
         toast.error(error.message || "Failed to create post.");
@@ -137,47 +188,63 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   };
 
   const handleLikeToggle = async (post: Post) => {
-    if (!user) {
-        toast.error("You must be logged in to like posts.");
-        return;
-    };
+    if (!user) return;
+
     const hasLiked = post.likes?.some(like => like.user_id === user.id);
+    const originalLikes = post.likes || [];
+    
+    // Optimistic UI update
+    const newLikes = hasLiked
+      ? originalLikes.filter(like => like.user_id !== user.id)
+      : [...originalLikes, { id: -1, post_id: post.id, user_id: user.id, created_at: new Date().toISOString() }];
+
+    setPosts(prevPosts => prevPosts.map(p => p.id === post.id ? { ...p, likes: newLikes } : p));
+
     try {
-      if (hasLiked) await supabase.from('likes').delete().match({ post_id: post.id, user_id: user.id });
-      else await supabase.from('likes').insert({ post_id: post.id, user_id: user.id });
-    } catch (error: any) { toast.error(error.message || "Could not update like."); }
+      if (hasLiked) {
+        await supabase.from('likes').delete().match({ post_id: post.id, user_id: user.id });
+      } else {
+        await supabase.from('likes').insert({ post_id: post.id, user_id: user.id });
+      }
+    } catch (error: any) { 
+      // Revert UI on failure
+      setPosts(prevPosts => prevPosts.map(p => p.id === post.id ? { ...p, likes: originalLikes } : p));
+      toast.error(error.message || "Could not update like."); 
+    }
   };
 
   const handleAddComment = async (postId: string) => {
-    const commentText = newComments[postId]?.trim();
-    if (!user) {
-        toast.error("You must be logged in to comment.");
-        return;
-    }
-    if (!commentText) return;
-    try {
-        await supabase.from('comments').insert({ post_id: postId, user_id: user.id, content: commentText });
-        setNewComments(prev => ({ ...prev, [postId]: '' }));
-    } catch (error: any) { toast.error(error.message || "Failed to add comment."); }
-  };
+      const commentText = newComments[postId]?.trim();
+      if (!user || !commentText || !profile) return;
 
-  const handleDeleteRequest = (post: Post) => {
-    setPostToDelete(post);
-    setIsDeleteDialogOpen(true);
-  };
+      const tempCommentId = Date.now();
+      const newComment: Comment = {
+        id: tempCommentId,
+        post_id: postId,
+        user_id: user.id,
+        content: commentText,
+        created_at: new Date().toISOString(),
+        profiles: profile,
+      };
 
-  const handleDeleteConfirm = async () => {
-    if (!postToDelete || !user || user.id !== postToDelete.user_id) return;
-    try {
-      const { error } = await supabase.from('posts').delete().eq('id', postToDelete.id);
-      if (error) throw error;
-      toast.success("Post deleted successfully.");
-    } catch (error: any) {
-      toast.error(error.message || "Failed to delete post.");
-    } finally {
-        setIsDeleteDialogOpen(false);
-        setPostToDelete(null);
-    }
+      // Optimistic UI Update
+      setPosts(prevPosts => prevPosts.map(p => 
+        p.id === postId ? { ...p, comments: [...(p.comments || []), newComment] } : p
+      ));
+      setNewComments(prev => ({ ...prev, [postId]: '' }));
+
+      try {
+        const { error } = await supabase.from('comments').insert({ post_id: postId, user_id: user.id, content: commentText });
+        if (error) throw error;
+        // On success, we can optionally refetch to get the real comment ID from the DB
+        fetchPosts();
+      } catch (error: any) { 
+        // Revert UI on failure
+        setPosts(prevPosts => prevPosts.map(p => 
+            p.id === postId ? { ...p, comments: p.comments?.filter(c => c.id !== tempCommentId) } : p
+        ));
+        toast.error(error.message || "Failed to add comment."); 
+      }
   };
   
   const handleShare = (postId: string) => {
@@ -186,16 +253,60 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
       toast.success('Post link copied to clipboard!');
   };
 
+  const handleDeletePost = async () => {
+    if (!postToDelete || !user) return;
+
+    const originalPosts = posts;
+    // Optimistic UI Update
+    setPosts(prevPosts => prevPosts.filter(p => p.id !== postToDelete.id));
+    setPostToDelete(null);
+
+    try {
+      const { error } = await supabase.from('posts').delete().match({ id: postToDelete.id, user_id: user.id });
+      if (error) throw error;
+      toast.success('Post deleted.');
+    } catch (error: any) {
+      // Revert UI on failure
+      setPosts(originalPosts);
+      toast.error(error.message || 'Failed to delete post.');
+    }
+  };
+
+  const handleEditClick = (post: Post) => {
+    setEditingPost(post);
+    setEditedContent(post.content || '');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingPost(null);
+    setEditedContent('');
+  };
+
+  const handleUpdatePost = async () => {
+    if (!editingPost || !user) return;
+    const foundUrl = editedContent.match(URL_REGEX);
+    const linkUrl = foundUrl ? foundUrl[0] : null;
+
+    try {
+      const { error } = await supabase
+        .from('posts')
+        .update({ content: editedContent, link_url: linkUrl })
+        .match({ id: editingPost.id, user_id: user.id });
+      if (error) throw error;
+      toast.success('Post updated.');
+      handleCancelEdit();
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to update post.');
+    }
+  };
+
   const toggleComments = (postId: string) => setExpandedComments(prev => ({ ...prev, [postId]: !prev[postId] }));
   const handleCommentChange = (postId: string, text: string) => setNewComments(prev => ({ ...prev, [postId]: text }));
 
   const canClaimResource = () => !!(user && profile?.role === 'student' && profile.verification_status === 'verified');
-  
+  const canSeeContactInfo = (post: Post) => canClaimResource();
+
   const handleClaimResource = (post: Post) => {
-      if (!user) {
-          toast.error("Please sign in to claim resources.");
-          return;
-      }
       if (!canClaimResource()) {
           toast.error('Only verified students can claim resources.');
           return;
@@ -204,7 +315,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   };
   
   const getUserBadges = (postProfile: Profile) => (
-    <div className="flex flex-wrap items-center gap-2">
+    <>
       <Badge variant="outline" className={`text-xs ${postProfile.role === 'donor' ? 'text-green-700 border-green-300 bg-green-50' : 'text-blue-700 border-blue-300 bg-blue-50'}`}>
           {postProfile.role === 'donor' ? <Heart className="w-3 h-3 mr-1" /> : <UserIcon className="w-3 h-3 mr-1" />}
           {postProfile.role === 'donor' ? 'Donor' : 'Student'}
@@ -214,7 +325,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             <CheckCircle className="w-3 h-3 mr-1" /> Verified
         </Badge>
       )}
-    </div>
+    </>
   );
 
   return (
@@ -227,7 +338,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
                     <TabsTrigger value="wisdom">Share Wisdom</TabsTrigger>
                     <TabsTrigger value="donation">Donate Resource</TabsTrigger>
                 </TabsList>
-                <TabsContent value="wisdom" className="space-y-4 pt-4"><Textarea placeholder="Share your knowledge..." value={content} onChange={e => setContent(e.target.value)} /></TabsContent>
+                <TabsContent value="wisdom" className="space-y-4 pt-4"><Textarea placeholder="Share your knowledge or a helpful link..." value={content} onChange={e => setContent(e.target.value)} /></TabsContent>
                 <TabsContent value="donation" className="space-y-4 pt-4">
                     <Input placeholder="Resource title (e.g., 'Programming Books')" value={resourceTitle} onChange={e => setResourceTitle(e.target.value)} />
                     <Select value={resourceCategory} onValueChange={setResourceCategory}>
@@ -256,12 +367,14 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         </Card>
       )}
 
-      {loading ? (<p className="text-center text-gray-500">Loading posts...</p>) : 
-      (
+      {loading && <p className="text-center text-gray-500">Loading posts...</p>}
+      
+      {!loading && (
         <div className="space-y-4">
             {posts.map((post) => {
-                const isOwner = user && user.id === post.user_id;
                 const hasLiked = user && post.likes?.some(like => like.user_id === user.id);
+                // Extract domain for display in the link preview
+                const domain = post.link_url ? new URL(post.link_url).hostname.replace('www.', '') : '';
                 return (
                   <Card key={post.id}>
                     <CardContent className="p-4 sm:p-6">
@@ -271,30 +384,74 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
                           <div className="flex justify-between items-start">
                             <div>
                                 <span className="font-semibold">{post.profiles?.username}</span>
-                                <div className="mt-1">{post.profiles && getUserBadges(post.profiles)}</div>
+                                <div className="flex items-center space-x-2 mt-1">{post.profiles && getUserBadges(post.profiles)}</div>
                                 <span className="text-xs text-gray-500">{formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}</span>
                             </div>
-                            {isOwner && (
+                            {user?.id === post.user_id && (
                                 <DropdownMenu>
-                                    <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="w-4 h-4" /></Button></DropdownMenuTrigger>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button variant="ghost" className="h-8 w-8 p-0">
+                                            <MoreHorizontal className="h-4 w-4" />
+                                        </Button>
+                                    </DropdownMenuTrigger>
                                     <DropdownMenuContent align="end">
-                                        <DropdownMenuItem disabled><Edit className="w-4 h-4 mr-2" />Edit (Coming Soon)</DropdownMenuItem>
-                                        <DropdownMenuItem onClick={() => handleDeleteRequest(post)} className="text-red-600"><Trash2 className="w-4 h-4 mr-2" />Delete</DropdownMenuItem>
+                                        <DropdownMenuItem onClick={() => handleEditClick(post)}>
+                                            <Edit className="mr-2 h-4 w-4" />
+                                            <span>Edit</span>
+                                        </DropdownMenuItem>
+                                        <DropdownMenuItem onClick={() => setPostToDelete(post)} className="text-red-600">
+                                            <Trash2 className="mr-2 h-4 w-4" />
+                                            <span>Delete</span>
+                                        </DropdownMenuItem>
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             )}
                           </div>
-                          <p className="my-2">{post.post_type === 'wisdom' ? post.content : post.resource_title}</p>
+                          
+                          {/* Post Content */}
+                          {editingPost?.id === post.id ? (
+                            <div className="my-2">
+                                <Textarea 
+                                    value={editedContent} 
+                                    onChange={(e) => setEditedContent(e.target.value)} 
+                                    className="mb-2"
+                                />
+                                <div className="flex justify-end gap-2">
+                                    <Button variant="ghost" size="sm" onClick={handleCancelEdit}>Cancel</Button>
+                                    <Button size="sm" onClick={handleUpdatePost}>Save</Button>
+                                </div>
+                            </div>
+                          ) : (
+                             <>
+                              {post.content && <p className="my-2 whitespace-pre-wrap">{post.content}</p>}
+                              {post.resource_title && <p className="my-2">{post.resource_title}</p>}
+                             </>
+                          )}
+
+
+                          {/* Link Preview Card */}
+                          {post.link_url && !editingPost && (
+                            <a href={post.link_url} target="_blank" rel="noopener noreferrer" className="block mt-2 border rounded-lg hover:bg-gray-50 transition-colors overflow-hidden">
+                              {post.link_image && <img src={post.link_image} alt={post.link_title || 'Link preview'} className="rounded-t-lg w-full max-h-64 object-cover" />}
+                              <div className="p-3">
+                                <div className="text-xs text-gray-500 uppercase flex items-center"><Link2 className="w-3 h-3 mr-1" />{domain}</div>
+                                <h4 className="font-semibold text-gray-800 mt-1">{post.link_title || post.link_url}</h4>
+                                {post.link_description && <p className="text-sm text-gray-600 line-clamp-2 mt-1">{post.link_description}</p>}
+                              </div>
+                            </a>
+                          )}
+                          
                           {post.image_url && <img src={post.image_url} alt="Post content" className="mt-2 rounded-lg max-h-96 w-full object-cover"/>}
+
                           {post.post_type === 'donation' && (
                             <div className="bg-blue-50 p-3 rounded-lg mt-2 space-y-2">
                               <div className="flex items-center text-sm"><Gift className="w-4 h-4 mr-2 text-blue-600" />Category: {post.resource_category}</div>
-                              {canClaimResource() ? (
+                              {canSeeContactInfo(post) ? (
                                 <div className="flex items-center text-sm"><CheckCircle className="w-4 h-4 mr-2 text-green-600" />Contact: {post.resource_contact}</div>
                               ) : (
                                 <div className="flex items-center text-sm text-gray-500"><Lock className="w-4 h-4 mr-2" />Contact hidden (Verified students only)</div>
                               )}
-                              <Button size="sm" className="w-full mt-2" onClick={() => handleClaimResource(post)} disabled={!user}>{!user ? "Sign In to Claim" : !canClaimResource() ? "Verification Required" : "Claim Resource"}</Button>
+                              <Button size="sm" className="w-full mt-2" onClick={() => handleClaimResource(post)} disabled={!canClaimResource()}>Claim Resource</Button>
                             </div>
                           )}
                           <div className="flex items-center justify-between mt-4 text-gray-500">
@@ -304,7 +461,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
                           </div>
                           {expandedComments[post.id] && (
                               <div className="mt-4 pt-4 border-t">
-                                  <div className="flex space-x-2"><Input placeholder="Write a comment..." value={newComments[post.id] || ''} onChange={e => handleCommentChange(post.id, e.target.value)}/><Button onClick={() => handleAddComment(post.id)} disabled={!user}>Post</Button></div>
+                                  <div className="flex space-x-2"><Input placeholder="Write a comment..." value={newComments[post.id] || ''} onChange={e => handleCommentChange(post.id, e.target.value)}/><Button onClick={() => handleAddComment(post.id)}>Post</Button></div>
                                   <div className="mt-4 space-y-4">
                                       {post.comments?.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map(comment => (
                                           <div key={comment.id} className="flex items-start space-x-2">
@@ -323,12 +480,22 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             })}
         </div>
       )}
-       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+
+      <AlertDialog open={postToDelete !== null} onOpenChange={() => setPostToDelete(null)}>
         <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>Are you sure?</AlertDialogTitle><AlertDialogDescription>This action cannot be undone. This will permanently delete your post.</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel onClick={() => setPostToDelete(null)}>Cancel</AlertDialogCancel><AlertDialogAction onClick={handleDeleteConfirm} className="bg-destructive hover:bg-destructive/90">Delete</AlertDialogAction></AlertDialogFooter>
+            <AlertDialogHeader>
+                <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+                <AlertDialogDescription>
+                    This action cannot be undone. This will permanently delete your post from our servers.
+                </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+                <AlertDialogCancel onClick={() => setPostToDelete(null)}>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleDeletePost} className="bg-red-600 hover:bg-red-700">Delete</AlertDialogAction>
+            </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
     </div>
   );
 }

@@ -203,4 +203,9 @@ export type Post = {
   profiles?: Profile; // Author's profile
   likes?: Like[]; // Likes on the post
   comments?: Comment[]; // Comments on the post
+  // New fields for link preview
+  link_url?: string;
+  link_title?: string;
+  link_description?: string;
+  link_image?: string;
 };
