@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { User, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { Profile, Post, supabase, isSupabaseConnected, Like, Comment } from '@/lib/supabase';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -12,8 +12,25 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+
 import { toast } from 'sonner';
-import { Heart, MessageCircle, Share2, CheckCircle, BookOpen, Gift, Lock, ImagePlus, User as UserIcon } from 'lucide-react';
+import { Heart, MessageCircle, Share2, CheckCircle, BookOpen, Gift, Lock, ImagePlus, MoreHorizontal, Edit, Trash2, User as UserIcon } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface CenterFeedProps {
@@ -38,33 +55,11 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   const [expandedComments, setExpandedComments] = useState<Record<string, boolean>>({});
   const [newComments, setNewComments] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    if (!isSupabaseConnected || !user || !user.email_confirmed_at) {
-      setLoading(false);
-      return;
-    }
+  // Edit/Delete states
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [postToDelete, setPostToDelete] = useState<Post | null>(null);
 
-    fetchPosts();
-    
-    const subscription = supabase
-      .channel('public-feed')
-      .on('postgres_changes', { event: '*', schema: 'public' }, (payload: RealtimePostgresChangesPayload<{ [key: string]: any }>) => {
-          fetchPosts();
-       })
-      .subscribe();
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, [user?.id]);
-
-  const fetchPosts = async () => {
-    if (!isSupabaseConnected || !user || !user.email_confirmed_at) {
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
+  const fetchPosts = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('posts')
@@ -77,15 +72,35 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      
       setPosts(data || []);
     } catch (error) {
       console.error('Error fetching posts:', error);
-      toast.error("Could not fetch posts from the database.");
+      toast.error("Could not fetch posts.");
     } finally {
-      setLoading(false);
+        // This check ensures we only set loading to false once after the initial fetch
+        if (loading) {
+            setLoading(false);
+        }
     }
-  };
+  }, [loading]); // The `loading` dependency is intentional to allow the initial load state to be managed correctly.
+
+  useEffect(() => {
+    // Fetch posts immediately on component mount, visible to all users.
+    fetchPosts();
+    
+    // Set up a single real-time subscription to listen for changes.
+    const channel = supabase
+      .channel('public-posts-feed')
+      .on('postgres_changes', { event: '*', schema: 'public' }, () => {
+          fetchPosts(); // Refetch data when any change occurs
+       })
+      .subscribe();
+
+    // Cleanup subscription on component unmount
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchPosts]);
 
   const handlePostSubmit = async () => {
     if (!user || !profile) return;
@@ -109,10 +124,9 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             resource_contact: composerType === 'donation' ? resourceContact.trim() : null,
             image_url: imageUrl,
         };
-
+      
         const { error } = await supabase.from('posts').insert(postData);
         if (error) throw error;
-
         setContent(''); setResourceTitle(''); setResourceCategory(''); setResourceContact(''); setPostImageFile(null);
         toast.success('Post created successfully!');
     } catch (error: any) {
@@ -123,7 +137,10 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   };
 
   const handleLikeToggle = async (post: Post) => {
-    if (!user) return;
+    if (!user) {
+        toast.error("You must be logged in to like posts.");
+        return;
+    };
     const hasLiked = post.likes?.some(like => like.user_id === user.id);
     try {
       if (hasLiked) await supabase.from('likes').delete().match({ post_id: post.id, user_id: user.id });
@@ -132,12 +149,35 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   };
 
   const handleAddComment = async (postId: string) => {
-      const commentText = newComments[postId]?.trim();
-      if (!user || !commentText) return;
-      try {
-          await supabase.from('comments').insert({ post_id: postId, user_id: user.id, content: commentText });
-          setNewComments(prev => ({ ...prev, [postId]: '' }));
-      } catch (error: any) { toast.error(error.message || "Failed to add comment."); }
+    const commentText = newComments[postId]?.trim();
+    if (!user) {
+        toast.error("You must be logged in to comment.");
+        return;
+    }
+    if (!commentText) return;
+    try {
+        await supabase.from('comments').insert({ post_id: postId, user_id: user.id, content: commentText });
+        setNewComments(prev => ({ ...prev, [postId]: '' }));
+    } catch (error: any) { toast.error(error.message || "Failed to add comment."); }
+  };
+
+  const handleDeleteRequest = (post: Post) => {
+    setPostToDelete(post);
+    setIsDeleteDialogOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!postToDelete || !user || user.id !== postToDelete.user_id) return;
+    try {
+      const { error } = await supabase.from('posts').delete().eq('id', postToDelete.id);
+      if (error) throw error;
+      toast.success("Post deleted successfully.");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to delete post.");
+    } finally {
+        setIsDeleteDialogOpen(false);
+        setPostToDelete(null);
+    }
   };
   
   const handleShare = (postId: string) => {
@@ -150,9 +190,12 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   const handleCommentChange = (postId: string, text: string) => setNewComments(prev => ({ ...prev, [postId]: text }));
 
   const canClaimResource = () => !!(user && profile?.role === 'student' && profile.verification_status === 'verified');
-  const canSeeContactInfo = (post: Post) => canClaimResource();
-
+  
   const handleClaimResource = (post: Post) => {
+      if (!user) {
+          toast.error("Please sign in to claim resources.");
+          return;
+      }
       if (!canClaimResource()) {
           toast.error('Only verified students can claim resources.');
           return;
@@ -161,7 +204,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   };
   
   const getUserBadges = (postProfile: Profile) => (
-    <>
+    <div className="flex flex-wrap items-center gap-2">
       <Badge variant="outline" className={`text-xs ${postProfile.role === 'donor' ? 'text-green-700 border-green-300 bg-green-50' : 'text-blue-700 border-blue-300 bg-blue-50'}`}>
           {postProfile.role === 'donor' ? <Heart className="w-3 h-3 mr-1" /> : <UserIcon className="w-3 h-3 mr-1" />}
           {postProfile.role === 'donor' ? 'Donor' : 'Student'}
@@ -171,7 +214,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             <CheckCircle className="w-3 h-3 mr-1" /> Verified
         </Badge>
       )}
-    </>
+    </div>
   );
 
   return (
@@ -213,11 +256,11 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         </Card>
       )}
 
-      {loading && <p className="text-center text-gray-500">Loading posts...</p>}
-      
-      {!loading && (
+      {loading ? (<p className="text-center text-gray-500">Loading posts...</p>) : 
+      (
         <div className="space-y-4">
             {posts.map((post) => {
+                const isOwner = user && user.id === post.user_id;
                 const hasLiked = user && post.likes?.some(like => like.user_id === user.id);
                 return (
                   <Card key={post.id}>
@@ -228,21 +271,30 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
                           <div className="flex justify-between items-start">
                             <div>
                                 <span className="font-semibold">{post.profiles?.username}</span>
-                                <div className="flex items-center space-x-2 mt-1">{post.profiles && getUserBadges(post.profiles)}</div>
+                                <div className="mt-1">{post.profiles && getUserBadges(post.profiles)}</div>
                                 <span className="text-xs text-gray-500">{formatDistanceToNow(new Date(post.created_at), { addSuffix: true })}</span>
                             </div>
+                            {isOwner && (
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="w-4 h-4" /></Button></DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                        <DropdownMenuItem disabled><Edit className="w-4 h-4 mr-2" />Edit (Coming Soon)</DropdownMenuItem>
+                                        <DropdownMenuItem onClick={() => handleDeleteRequest(post)} className="text-red-600"><Trash2 className="w-4 h-4 mr-2" />Delete</DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
                           </div>
                           <p className="my-2">{post.post_type === 'wisdom' ? post.content : post.resource_title}</p>
                           {post.image_url && <img src={post.image_url} alt="Post content" className="mt-2 rounded-lg max-h-96 w-full object-cover"/>}
                           {post.post_type === 'donation' && (
                             <div className="bg-blue-50 p-3 rounded-lg mt-2 space-y-2">
                               <div className="flex items-center text-sm"><Gift className="w-4 h-4 mr-2 text-blue-600" />Category: {post.resource_category}</div>
-                              {canSeeContactInfo(post) ? (
+                              {canClaimResource() ? (
                                 <div className="flex items-center text-sm"><CheckCircle className="w-4 h-4 mr-2 text-green-600" />Contact: {post.resource_contact}</div>
                               ) : (
                                 <div className="flex items-center text-sm text-gray-500"><Lock className="w-4 h-4 mr-2" />Contact hidden (Verified students only)</div>
                               )}
-                              <Button size="sm" className="w-full mt-2" onClick={() => handleClaimResource(post)} disabled={!canClaimResource()}>Claim Resource</Button>
+                              <Button size="sm" className="w-full mt-2" onClick={() => handleClaimResource(post)} disabled={!user}>{!user ? "Sign In to Claim" : !canClaimResource() ? "Verification Required" : "Claim Resource"}</Button>
                             </div>
                           )}
                           <div className="flex items-center justify-between mt-4 text-gray-500">
@@ -252,7 +304,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
                           </div>
                           {expandedComments[post.id] && (
                               <div className="mt-4 pt-4 border-t">
-                                  <div className="flex space-x-2"><Input placeholder="Write a comment..." value={newComments[post.id] || ''} onChange={e => handleCommentChange(post.id, e.target.value)}/><Button onClick={() => handleAddComment(post.id)}>Post</Button></div>
+                                  <div className="flex space-x-2"><Input placeholder="Write a comment..." value={newComments[post.id] || ''} onChange={e => handleCommentChange(post.id, e.target.value)}/><Button onClick={() => handleAddComment(post.id)} disabled={!user}>Post</Button></div>
                                   <div className="mt-4 space-y-4">
                                       {post.comments?.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map(comment => (
                                           <div key={comment.id} className="flex items-start space-x-2">
@@ -271,6 +323,12 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             })}
         </div>
       )}
+       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>Are you sure?</AlertDialogTitle><AlertDialogDescription>This action cannot be undone. This will permanently delete your post.</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel onClick={() => setPostToDelete(null)}>Cancel</AlertDialogCancel><AlertDialogAction onClick={handleDeleteConfirm} className="bg-destructive hover:bg-destructive/90">Delete</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
