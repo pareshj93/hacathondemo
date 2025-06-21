@@ -62,60 +62,6 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   const [postToDelete, setPostToDelete] = useState<Post | null>(null);
 
 
-  useEffect(() => {
-    if (!isSupabaseConnected) {
-      setLoading(false);
-      return;
-    }
-
-    fetchPosts();
-
-    const handleIncomingPost = async (postPayload: Post) => {
-        // When a new post comes in from the subscription, it won't have the author's profile.
-        // We need to fetch it to ensure the UI can render it correctly.
-        const { data: profileData, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', postPayload.user_id)
-            .single();
-
-        if (profileData && !error) {
-            const newPost: Post = {
-                ...postPayload,
-                profiles: profileData,
-                likes: [], // New posts have no likes
-                comments: [], // New posts have no comments
-            };
-            // Prepend the new, complete post to the feed
-            setPosts(prev => [newPost, ...prev]);
-        }
-    };
-    
-    // Listen for any changes in the database and refetch posts
-    const subscription = supabase
-      .channel('public-feed')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'posts' }, (payload: RealtimePostgresChangesPayload<Post>) => {
-          const newPost = payload.new as Post;
-          // Type guard to ensure we have a valid post object
-          if (newPost && newPost.id) {
-            handleIncomingPost(newPost);
-          }
-       })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'posts' }, (payload: RealtimePostgresChangesPayload<Post>) => {
-        const updatedPost = payload.new as Post;
-        // Type guard to ensure we have a valid post object with an ID
-        if (updatedPost && updatedPost.id) {
-          // Update a post in place, preserving existing relations
-          setPosts(prevPosts => prevPosts.map(p => p.id === updatedPost.id ? { ...p, ...updatedPost } : p));
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(subscription);
-    };
-  }, []);
-
   const fetchPosts = async () => {
     setLoading(true);
     try {
@@ -140,12 +86,38 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
     }
   };
 
+  useEffect(() => {
+    // This effect now depends on `user?.id`. It will run once on mount,
+    // and then re-run if the user logs in or out.
+    if (!isSupabaseConnected || !user?.id) {
+        setPosts([]); // Clear posts if user logs out
+        setLoading(false);
+        return;
+    }
+
+    fetchPosts();
+    
+    // Set up a more robust real-time subscription.
+    const subscription = supabase
+      .channel('public-feed-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, (payload) => {
+        // On any change, simply refetch the entire list.
+        // This is simpler and more reliable than trying to patch the state.
+        fetchPosts();
+      })
+      .subscribe();
+
+    // Cleanup: remove the subscription when the component unmounts or the user changes.
+    return () => {
+      supabase.removeChannel(subscription);
+    };
+  }, [user?.id]); // The key change: dependency on user.id
+
   const handlePostSubmit = async () => {
     if (!user || !profile) return;
     setSubmitting(true);
     let imageUrl: string | undefined = undefined;
 
-    // Detect the first link in the post content
     const foundUrl = content.match(URL_REGEX);
     const linkUrl = foundUrl ? foundUrl[0] : undefined;
     
@@ -166,14 +138,25 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
             resource_category: composerType === 'donation' ? resourceCategory : undefined,
             resource_contact: composerType === 'donation' ? resourceContact.trim() : undefined,
             image_url: imageUrl,
-            link_url: linkUrl, // Save the detected link to the database
+            link_url: linkUrl,
         };
         
-        // This insert will be caught by the realtime subscription, which will then add it to the UI.
-        const { error } = await supabase.from('posts').insert([postData]).select().single();
+        // Use .select().single() to get the newly created post back from the DB
+        const { data: newPost, error } = await supabase.from('posts').insert(postData).select().single();
+
         if (error) throw error;
 
-        // Reset composer fields
+        // Optimistic UI Update: Add the new post with profile data to the top of the feed
+        if(newPost) {
+            const postWithProfile: Post = {
+                ...newPost,
+                profiles: profile,
+                likes: [],
+                comments: []
+            };
+            setPosts(prevPosts => [postWithProfile, ...prevPosts]);
+        }
+
         setContent(''); 
         setResourceTitle(''); 
         setResourceCategory(''); 
@@ -189,11 +172,9 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
 
   const handleLikeToggle = async (post: Post) => {
     if (!user) return;
-
     const hasLiked = post.likes?.some(like => like.user_id === user.id);
     const originalLikes = post.likes || [];
     
-    // Optimistic UI update
     const newLikes = hasLiked
       ? originalLikes.filter(like => like.user_id !== user.id)
       : [...originalLikes, { id: -1, post_id: post.id, user_id: user.id, created_at: new Date().toISOString() }];
@@ -207,7 +188,6 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         await supabase.from('likes').insert({ post_id: post.id, user_id: user.id });
       }
     } catch (error: any) { 
-      // Revert UI on failure
       setPosts(prevPosts => prevPosts.map(p => p.id === post.id ? { ...p, likes: originalLikes } : p));
       toast.error(error.message || "Could not update like."); 
     }
@@ -216,7 +196,6 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
   const handleAddComment = async (postId: string) => {
       const commentText = newComments[postId]?.trim();
       if (!user || !commentText || !profile) return;
-
       const tempCommentId = Date.now();
       const newComment: Comment = {
         id: tempCommentId,
@@ -227,7 +206,6 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
         profiles: profile,
       };
 
-      // Optimistic UI Update
       setPosts(prevPosts => prevPosts.map(p => 
         p.id === postId ? { ...p, comments: [...(p.comments || []), newComment] } : p
       ));
@@ -236,10 +214,8 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
       try {
         const { error } = await supabase.from('comments').insert({ post_id: postId, user_id: user.id, content: commentText });
         if (error) throw error;
-        // On success, we can optionally refetch to get the real comment ID from the DB
-        fetchPosts();
+        fetchPosts(); // Refetch to get the real comment ID
       } catch (error: any) { 
-        // Revert UI on failure
         setPosts(prevPosts => prevPosts.map(p => 
             p.id === postId ? { ...p, comments: p.comments?.filter(c => c.id !== tempCommentId) } : p
         ));
@@ -255,9 +231,7 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
 
   const handleDeletePost = async () => {
     if (!postToDelete || !user) return;
-
     const originalPosts = posts;
-    // Optimistic UI Update
     setPosts(prevPosts => prevPosts.filter(p => p.id !== postToDelete.id));
     setPostToDelete(null);
 
@@ -266,7 +240,6 @@ export default function CenterFeed({ user, profile }: CenterFeedProps) {
       if (error) throw error;
       toast.success('Post deleted.');
     } catch (error: any) {
-      // Revert UI on failure
       setPosts(originalPosts);
       toast.error(error.message || 'Failed to delete post.');
     }

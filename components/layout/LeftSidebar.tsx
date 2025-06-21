@@ -4,10 +4,10 @@ import { User } from '@supabase/supabase-js';
 import { Profile } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { signOut } from '@/lib/auth';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { CheckCircle, Clock, AlertCircle, Home, User as UserIcon, Shield, LogOut, Heart } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -19,6 +19,8 @@ interface LeftSidebarProps {
 
 export default function LeftSidebar({ user, profile, onAuthClick }: LeftSidebarProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const currentPage = searchParams.get('page') || 'feed';
 
   const handleSignOut = async () => {
     try {
@@ -102,6 +104,7 @@ export default function LeftSidebar({ user, profile, onAuthClick }: LeftSidebarP
           <CardContent className="p-4">
             <div className="flex items-center space-x-3 mb-4">
               <Avatar className="w-12 h-12">
+                <AvatarImage src={profile.avatar_url} alt={profile.username} />
                 <AvatarFallback className={`text-white text-lg ${profile.role === 'donor' ? 'bg-green-600' : 'bg-blue-600'}`}>
                   {profile.username.charAt(0).toUpperCase()}
                 </AvatarFallback>
@@ -153,7 +156,7 @@ export default function LeftSidebar({ user, profile, onAuthClick }: LeftSidebarP
         <CardContent className="p-4">
           <nav className="space-y-2">
             <Button 
-              variant="ghost" 
+              variant={currentPage === 'feed' ? 'secondary' : 'ghost'}
               className="w-full justify-start"
               onClick={() => router.push('/?page=feed')}
             >
@@ -162,7 +165,7 @@ export default function LeftSidebar({ user, profile, onAuthClick }: LeftSidebarP
             </Button>
             {user && user.email_confirmed_at && (
               <Button 
-                variant="ghost" 
+                variant={currentPage === 'profile' ? 'secondary' : 'ghost'}
                 className="w-full justify-start"
                 onClick={() => router.push('/?page=profile')}
               >
@@ -171,7 +174,7 @@ export default function LeftSidebar({ user, profile, onAuthClick }: LeftSidebarP
               </Button>
             )}
             <Button 
-              variant="ghost" 
+              variant={currentPage === 'privacy' ? 'secondary' : 'ghost'}
               className="w-full justify-start"
               onClick={() => router.push('/?page=privacy')}
             >
