@@ -31,7 +31,7 @@ if (supabaseUrl && supabaseAnonKey && isValidUrl(supabaseUrl)) {
       auth: {
         autoRefreshToken: true,
         persistSession: true,
-        detectSessionInUrl: true // Re-enable to handle email verification redirects
+        detectSessionInUrl: true
       }
     });
     connectionStatus = 'connected';
@@ -148,6 +148,9 @@ export const isSupabaseConnected = connectionStatus === 'connected';
 
 console.log('📊 Final connection status:', { isSupabaseConnected, connectionStatus });
 
+
+// --- NEW AND UPDATED TYPES ---
+
 export type Profile = {
   id: string;
   email: string;
@@ -155,6 +158,7 @@ export type Profile = {
   role: 'student' | 'donor';
   verification_status: 'unverified' | 'pending' | 'verified';
   created_at: string;
+  avatar_url?: string; // Added for profile pictures
   donor_type?: string;
   bio?: string;
   organization?: string;
@@ -167,7 +171,24 @@ export type DonorProfile = {
   created_at: string;
   role: 'donor';
   verification_status: 'verified';
+  avatar_url?: string;
 };
+
+export type Like = {
+  id: number;
+  post_id: string;
+  user_id: string;
+  created_at: string;
+}
+
+export type Comment = {
+  id: number;
+  post_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  profiles?: Profile; // To show commenter's info
+}
 
 export type Post = {
   id: string;
@@ -177,6 +198,9 @@ export type Post = {
   resource_title?: string;
   resource_category?: string;
   resource_contact?: string;
+  image_url?: string; // Added for post images
   created_at: string;
-  profiles?: Profile;
+  profiles?: Profile; // Author's profile
+  likes?: Like[]; // Likes on the post
+  comments?: Comment[]; // Comments on the post
 };

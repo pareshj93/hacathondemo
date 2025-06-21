@@ -1,22 +1,70 @@
 'use client';
 
+import { useState } from 'react';
 import { User } from '@supabase/supabase-js';
-import { Profile } from '@/lib/supabase';
+import { Profile, supabase } from '@/lib/supabase';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { useRouter } from 'next/navigation';
-import { CheckCircle, Clock, AlertCircle, User as UserIcon, Mail, Calendar, Heart } from 'lucide-react';
+import { toast } from 'sonner';
+import { CheckCircle, Clock, AlertCircle, User as UserIcon, Mail, Calendar, Heart, Upload } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 interface ProfilePageProps {
   user: User | null;
   profile: Profile | null;
+  onVerificationUpdate: (userId: string) => void;
 }
 
-export default function ProfilePage({ user, profile }: ProfilePageProps) {
+export default function ProfilePage({ user, profile, onVerificationUpdate }: ProfilePageProps) {
   const router = useRouter();
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setAvatarFile(e.target.files[0]);
+    }
+  };
+
+  const handleAvatarUpload = async () => {
+    if (!avatarFile || !user) return;
+
+    setUploading(true);
+    try {
+      const filePath = `${user.id}/${Date.now()}_${avatarFile.name}`;
+      
+      const { error: uploadError } = await supabase.storage
+        .from('profile-pictures')
+        .upload(filePath, avatarFile);
+
+      if (uploadError) throw uploadError;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('profile-pictures')
+        .getPublicUrl(filePath);
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ avatar_url: publicUrl })
+        .eq('id', user.id);
+
+      if (updateError) throw updateError;
+      
+      toast.success('Profile picture updated successfully!');
+      // Trigger a profile reload in the main layout
+      onVerificationUpdate(user.id);
+      setAvatarFile(null);
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to upload profile picture.');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   if (!user || !profile) {
     return (
@@ -36,7 +84,6 @@ export default function ProfilePage({ user, profile }: ProfilePageProps) {
   }
 
   const getVerificationBadge = () => {
-    // Donors are automatically verified
     if (profile.role === 'donor') {
       return (
         <Badge className="bg-green-100 text-green-800 hover:bg-green-100">
@@ -45,8 +92,6 @@ export default function ProfilePage({ user, profile }: ProfilePageProps) {
         </Badge>
       );
     }
-
-    // Students need verification
     switch (profile.verification_status) {
       case 'verified':
         return (
@@ -101,21 +146,35 @@ export default function ProfilePage({ user, profile }: ProfilePageProps) {
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="flex items-center space-x-4">
-            <Avatar className="w-16 h-16">
-              <AvatarFallback className={`text-white text-xl ${profile.role === 'donor' ? 'bg-green-600' : 'bg-blue-600'}`}>
+            <Avatar className="w-20 h-20 text-3xl">
+              <AvatarImage src={profile.avatar_url} alt={profile.username} />
+              <AvatarFallback className={`text-white ${profile.role === 'donor' ? 'bg-green-600' : 'bg-blue-600'}`}>
                 {profile.username.charAt(0).toUpperCase()}
               </AvatarFallback>
             </Avatar>
             <div className="flex-1">
               <h2 className="text-2xl font-bold text-gray-900">{profile.username}</h2>
-              <div className="flex items-center space-x-2 mt-1">
+              <div className="flex flex-wrap items-center gap-2 mt-1">
                 {getRoleBadge()}
                 {getVerificationBadge()}
               </div>
             </div>
           </div>
+          
+          <div className="space-y-2">
+            <Label htmlFor="avatar-upload">Update Profile Picture</Label>
+            <div className="flex items-center space-x-2">
+               <Input id="avatar-upload" type="file" accept="image/*" onChange={handleAvatarChange} className="flex-grow" />
+               <Button onClick={handleAvatarUpload} disabled={!avatarFile || uploading}>
+                 <Upload className="w-4 h-4 mr-2" />
+                 {uploading ? 'Uploading...' : 'Upload'}
+               </Button>
+            </div>
+            {avatarFile && <p className="text-sm text-gray-500">Selected: {avatarFile.name}</p>}
+          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-4">
             <div className="flex items-center space-x-2">
               <Mail className="w-4 h-4 text-gray-500" />
               <span className="text-gray-600">{profile.email}</span>
@@ -127,24 +186,6 @@ export default function ProfilePage({ user, profile }: ProfilePageProps) {
               </span>
             </div>
           </div>
-
-          {profile.role === 'donor' && (
-            <div className="bg-green-50 p-4 rounded-lg">
-              <h3 className="font-semibold text-green-900 mb-2">✨ Thank You for Being a Donor!</h3>
-              <p className="text-green-800 text-sm mb-3">
-                As a verified donor, you have full access to all platform features and can help students immediately.
-              </p>
-              <div className="text-sm text-green-700">
-                <p className="font-medium mb-1">What you can do:</p>
-                <ul className="space-y-1">
-                  <li>• Share wisdom and knowledge with the community</li>
-                  <li>• Donate resources to verified students</li>
-                  <li>• Mentor students and provide guidance</li>
-                  <li>• Access all platform features without restrictions</li>
-                </ul>
-              </div>
-            </div>
-          )}
 
           {profile.role === 'student' && profile.verification_status === 'unverified' && (
             <div className="bg-blue-50 p-4 rounded-lg">
@@ -161,60 +202,6 @@ export default function ProfilePage({ user, profile }: ProfilePageProps) {
               </Button>
             </div>
           )}
-
-          {profile.verification_status === 'pending' && (
-            <div className="bg-yellow-50 p-4 rounded-lg">
-              <h3 className="font-semibold text-yellow-900 mb-2">Verification in Progress</h3>
-              <p className="text-yellow-800 text-sm">
-                Your verification is under review. We'll notify you once it's approved. This typically takes 24-48 hours.
-              </p>
-            </div>
-          )}
-
-          {profile.role === 'student' && profile.verification_status === 'verified' && (
-            <div className="bg-green-50 p-4 rounded-lg">
-              <h3 className="font-semibold text-green-900 mb-2">Account Verified ✓</h3>
-              <p className="text-green-800 text-sm">
-                Your student account is verified! You now have access to all platform features.
-              </p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Account Features</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">Share Wisdom Posts</span>
-              <Badge variant={profile.role === 'donor' || profile.verification_status === 'verified' ? 'default' : 'secondary'}>
-                {profile.role === 'donor' || profile.verification_status === 'verified' ? 'Enabled' : 'Disabled'}
-              </Badge>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">Donate Resources</span>
-              <Badge variant={profile.role === 'donor' || profile.verification_status === 'verified' ? 'default' : 'secondary'}>
-                {profile.role === 'donor' || profile.verification_status === 'verified' ? 'Enabled' : 'Disabled'}
-              </Badge>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">Claim Resources</span>
-              <Badge variant={profile.role === 'student' && profile.verification_status === 'verified' ? 'default' : 'secondary'}>
-                {profile.role === 'student' && profile.verification_status === 'verified' ? 'Enabled' : 'Disabled'}
-              </Badge>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">View All Posts</span>
-              <Badge variant="default">Enabled</Badge>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-gray-600">Report Content</span>
-              <Badge variant="default">Enabled</Badge>
-            </div>
-          </div>
         </CardContent>
       </Card>
     </div>

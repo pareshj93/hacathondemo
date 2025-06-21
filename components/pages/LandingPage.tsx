@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation'; // Keep as absolute import, should be resolved by Next.js
-import AuthModal from '../../components/auth/AuthModal'; // Changed to relative path
-import HackathonPopup from '../../components/ui/HackathonPopup'; // Changed to relative path
+import { useRouter } from 'next/navigation';
+import { AuthModal } from '@/components/auth/AuthModal'; // Corrected: Named import with path alias
+import HackathonPopup from '@/components/ui/HackathonPopup'; // Corrected: Using path alias
 
 // Import Lucide icons directly as React components
 import {
