@@ -123,7 +123,7 @@ export default function PrivacyPage() {
               <div className="space-y-4 text-gray-700">
                 <p>
                   If you have questions about this Privacy Policy or our data practices, 
-                  please contact us at: <strong>privacy@edubridgepeople.com</strong>
+                  please contact us at: <strong>info@edubridgepeople.com</strong>
                 </p>
                 <p>
                   We are committed to resolving any privacy concerns and will respond to 

@@ -13,6 +13,7 @@ import AuthModal from '@/components/auth/AuthModal';
 import ProfilePage from '@/components/pages/ProfilePage';
 import PrivacyPage from '@/components/pages/PrivacyPage';
 import VerificationPage from '@/components/pages/VerificationPage';
+import TermsAndConditionsPage from '@/components/pages/TermsAndConditionsPage'; // Import the new T&C page
 import HackathonPopup from '@/components/ui/HackathonPopup';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -304,6 +305,8 @@ export default function MainLayout() {
         return <PrivacyPage />;
       case 'verification':
         return <VerificationPage user={user} profile={profile} onVerificationUpdate={loadProfile} />;
+      case 'terms': // New case for Terms & Conditions page
+        return <TermsAndConditionsPage />;
       default:
         return (
           <div className="grid grid-cols-12 gap-4 sm:gap-6 max-w-7xl mx-auto px-4">
